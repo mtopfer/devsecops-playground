@@ -1,0 +1,18 @@
+credentials:
+  system:
+    domainCredentials:
+    - credentials:
+      - usernamePassword:
+          description: "Admin user for SonarQube"
+          id: "sonarqube-admin"
+          password: "${sonarqubePassword}"
+          scope: GLOBAL
+          username: "admin"
+      - basicSSHUserPrivateKey:
+          description: "SSH Key for Github account"
+          id: "github-key"
+          privateKeySource:
+            directEntry:
+              privateKey: "${githubKey}"
+          scope: GLOBAL
+          username: "GITHUB_USERNAME_HERE"

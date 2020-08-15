@@ -1,0 +1,40 @@
+# Jenkins - docker-compose.yaml
+version: '3.1'
+
+services:
+
+  jenkins:
+    build:
+      context: ..
+    image: jenkins-manager:latest
+    restart: always
+    networks:
+     - jenkinsnet
+    environment:
+      JAVA_OPTS: "-Xmx2048m -Djava.awt.headless=true"
+      JENKINS_OPTS: "--httpPort=18080"
+    ports:
+      - 18080:18080
+      - 50000:50000
+    container_name: jenkins-manager
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+    secrets:
+      - githubKey
+      - sonarqubePassword 
+
+networks:
+  jenkinsnet:
+    ipam:
+      driver: default
+      config:
+       - subnet: "172.22.0.0/24"
+volumes: 
+  jenkins_home:
+
+secrets: 
+  githubKey:
+    file: secrets/ssh-github.pem
+  sonarqubePassword: 
+    file: secrets/pass-sonarqube.txt

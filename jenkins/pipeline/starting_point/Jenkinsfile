@@ -1,0 +1,150 @@
+pipeline {
+    agent {
+        docker {
+            image 'jdk11-agent'
+            args '-v /var/jenkins_home/.m2:/root/.m2'
+        }
+    }
+    parameters {
+        string(
+                defaultValue: 'github.com:GITHUB_USERNAME_HERE/WebGoat.git',
+                description: 'Github project repository url',
+                name: 'projectRepo')
+        string(
+                defaultValue: 'webgoat-server',
+                description: 'Name of the project',
+                name: 'projectName')
+        string(
+                defaultValue: '8.1.0',
+                description: 'Version of the project',
+                name: 'projectVersion')
+    }
+    environment {
+        dockerVersion = '19.03.12'
+        dockerRegistryUrl = "192.168.187.128:32000"
+        kubernetesHostIp = "192.168.187.128"
+    }
+    stages {
+
+        stage('Checkout') {
+            steps {
+
+                echo "\n------------------------------------------\n" +
+                        "CHECKOUT STAGE --------------------------\n" +
+                        "------------------------------------------"
+
+                // Cleanup the workspace folder
+                //deleteDir()
+
+                //// Execution vars output, useful for troubleshooting
+                //sh 'echo "Home folder is: $HOME"'
+                //sh 'printenv'
+
+                // Checkout the project's source code
+                checkout([$class: 'GitSCM', branches: [[name: 'origin/develop']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'github-key', url: 'git@' + projectRepo]]])
+
+            }
+        }
+
+        stage('Build and Unit Test') {
+            steps {
+
+                echo "\n------------------------------------------\n" +
+                        "BUILD AND UNIT TEST STAGE  --------------\n" +
+                        "------------------------------------------"
+
+                sh 'mvn clean install'
+                sh 'mvn install -Dmaven.test.skip=true'
+                sh 'echo "X"'
+            }
+
+        }
+
+        stage('Docker Build') {
+            steps {
+                echo "\n------------------------------------------\n" +
+                        "DOCKER BUILD STAGE ----------------------\n" +
+                        "------------------------------------------"
+
+                sh 'docker --version'
+                // Clean the previously built image
+                sh 'docker rmi ${dockerRegistryUrl}/${projectName}-${projectVersion} ${projectName}:${projectVersion} || true'
+                sh 'cd docker && docker build . -t ${projectName}:${projectVersion} --build-arg webgoat_version=v${projectVersion}'
+
+            }
+
+        }
+
+        stage('Docker Push') {
+            steps {
+                echo "\n------------------------------------------\n" +
+                        "DOCKER PUSH STAGE -----------------------\n" +
+                        "------------------------------------------"
+
+                sh '''
+                        docker tag ${projectName}:${projectVersion} ${dockerRegistryUrl}/${projectName}-${projectVersion}
+                        docker push ${dockerRegistryUrl}/${projectName}-${projectVersion}
+                        
+                   '''
+
+                script {
+                    echo "Getting image digest..."
+                    imageDigest = sh(script: 'docker inspect --format=\'{{index .RepoDigests 0}}\' ${dockerRegistryUrl}/${projectName}-${projectVersion} | cut -d "@" -f 2', returnStdout: true).trim()
+                }
+
+                echo "Image Digest: ${imageDigest}"
+
+            }
+
+        }
+
+        stage('Deploy') {
+            environment {
+                imageDigest = "${imageDigest}"
+            }
+            steps {
+                echo "\n------------------------------------------\n" +
+                        "DEPLOY STAGE ----------------------------\n" +
+                        "------------------------------------------"
+
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+
+                    sh '''
+                        set +x
+                        echo "\nPrint cluster-info..."
+                        kubectl --kubeconfig $KUBECONFIG cluster-info
+
+                        APP_VERSION=${projectVersion}
+                        echo "\nDeleting existing deployment (if exists)..."
+                        kubectl --kubeconfig $KUBECONFIG delete pod ${projectName} || true
+                        kubectl --kubeconfig $KUBECONFIG delete svc ${projectName} || true
+
+                        echo "\nDeploying application version v${APP_VERSION}..." 
+                        kubectl --kubeconfig $KUBECONFIG run ${projectName} --image=localhost:32000/${projectName}-${projectVersion}@${imageDigest} --env TZ=Europe/Dublin
+                        kubectl --kubeconfig $KUBECONFIG expose pod ${projectName} --type NodePort --port=8080 --name=${projectName}
+
+                        echo "\n-----------------------------------------------------------------------------------------"
+                        echo "Deployment successful, application can be accessed on the following URL:"
+                        NODE_PORT=$(kubectl --kubeconfig $KUBECONFIG get service webgoat-server -o=jsonpath='{.spec.ports[0].nodePort}')
+                        echo "-----------------------------------------------------------------------------------------"
+                        echo "http://${kubernetesHostIp}:${NODE_PORT}/WebGoat/login"
+                        echo "-----------------------------------------------------------------------------------------"
+
+                   '''
+
+                }
+
+            }
+
+        }
+
+    }   // stages end
+
+    post {
+        unstable {
+            echo 'Job run was UNSTABLE'
+            // Add post steps for unstable run here
+        }
+    }
+
+}

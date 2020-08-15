@@ -1,0 +1,412 @@
+pipeline {
+    agent {
+        docker {
+            image 'jdk11-agent'
+            args '-v /var/jenkins_home/.m2:/root/.m2'
+        }
+    }
+    parameters {
+        string(
+                defaultValue: 'github.com:GITHUB_USERNAME_HERE/WebGoat.git',
+                description: 'Github project repository url',
+                name: 'projectRepo')
+        string(
+                defaultValue: 'webgoat-server',
+                description: 'Name of the project',
+                name: 'projectName')
+        string(
+                defaultValue: '8.1.0',
+                description: 'Version of the project',
+                name: 'projectVersion')
+        booleanParam(
+                defaultValue: true,
+                description: '',
+                name: 'ENABLE_SONARQUBE_SCAN')
+        booleanParam(
+                defaultValue: true,
+                description: '',
+                name: 'ENABLE_SONARQUBE_QUALITYGATE')
+        booleanParam(
+                defaultValue: true,
+                description: '',
+                name: 'ENABLE_DEPENDENCY_CHECK')
+        booleanParam(
+                defaultValue: true,
+                description: '',
+                name: 'ENABLE_SCANCODE_CHECK')
+        booleanParam(
+                defaultValue: true,
+                description: '',
+                name: 'ENABLE_CLAIR_SCAN')
+        string(
+                defaultValue: '300',
+                description: 'Number of Clair reported vulnerabilities tolerated for this run',
+                name: 'clairTreshold')
+        booleanParam(
+                defaultValue: true,
+                description: '',
+                name: 'ENABLE_ARACHNI_SCAN')
+
+    }
+    environment {
+        dockerVersion = '19.03.12'
+        dockerRegistryUrl = "192.168.187.128:32000"
+        kubernetesHostIp = "192.168.187.128"
+        defectDojoUrl = "http://172.26.0.1:38080"
+        clairServerUrl = "http://172.27.0.1:6060"
+        reportSuffix = "${env.JOB_NAME}-${env.BUILD_ID}"
+    }
+    stages {
+
+
+        stage('Checkout') {
+            steps {
+
+                echo "\n------------------------------------------\n" +
+                        "CHECKOUT STAGE --------------------------\n" +
+                        "------------------------------------------"
+
+                // Cleanup the workspace folder
+                //deleteDir()
+
+                //// Execution vars output, useful for troubleshooting
+                //sh 'echo "Home folder is: $HOME"'
+                //sh 'printenv'
+
+                // Checkout the project's source code
+                checkout([$class: 'GitSCM', branches: [[name: 'origin/develop']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'github-key', url: 'git@' + projectRepo]]])
+
+                // Remove reports from previous runs
+                sh 'rm -rf reports && mkdir reports'
+
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            when {
+                expression { params.ENABLE_SONARQUBE_SCAN == true }
+            }
+            environment {
+                scannerHome = tool 'Sonar-Scanner-4.3'
+                projectName = '${projectName}'
+                sonarQubeReportName = "sonarqube-report-${reportSuffix}"
+            }
+            steps {
+                echo "\n------------------------------------------\n" +
+                        "SONARQUBE ANALYSIS STAGE ----------------\n" +
+                        "------------------------------------------"
+
+                withSonarQubeEnv('Sonarqube-Local') {
+                    sh 'printenv'
+                    sh 'mvn clean compile sonar:sonar'
+
+                    // Export report to DefectDojo
+                    // 'sonar-report' parameters available here https://www.npmjs.com/package/sonar-report
+                    sh '''
+                    set -x
+                    echo "Creating SonarQube HTML report..."
+                    sonar-report \\
+                      --sonarurl="$SONAR_HOST_URL" \\
+                      --sonarcomponent="sopra-steria:soprasteria_sonar-report" \\
+                      --project="${projectName}" \\
+                      --application="sonar-report" \\
+                      --release="${projectVersion}" \\
+                      --branch="master" \\
+                      --sinceleakperiod="false" \\
+                      --allbugs="false" > reports/${sonarQubeReportName}.html
+                      
+                '''
+                }
+
+                withCredentials([usernameColonPassword(credentialsId: 'defectdojo-api-key', variable: 'DD_APIKEY')]) {
+
+                    sh '''
+                    echo "Uploading report to DefectDojo..." 
+                    DATE_TIME=\"\$(date +'%Y-%m-%d')\"
+                    curl -s -i -F file=@reports/${sonarQubeReportName}.html -H "Authorization: ApiKey $DD_APIKEY" -F 'scan_type=SonarQube Scan' -F 'verified=true' -F 'active=true' -F scan_date=\${DATE_TIME} -F 'engagement=/api/v1/engagements/1/' ${defectDojoUrl}/api/v1/importscan/
+                '''
+
+                }
+
+            }
+        }
+
+        stage("SonarQube Quality Gate") {
+            when {
+                expression { params.ENABLE_SONARQUBE_QUALITYGATE == true }
+            }
+            steps {
+                echo "\n------------------------------------------\n" +
+                        "SONARQUBE QUALITY GATE STAGE ------------\n" +
+                        "------------------------------------------"
+
+                withSonarQubeEnv('Sonarqube-Local') {
+
+                    timeout(time: 15, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true
+                    }
+                }
+
+            }
+        }
+
+        stage('Build and Unit Test') {
+            steps {
+
+                echo "\n------------------------------------------\n" +
+                        "BUILD AND UNIT TEST STAGE  --------------\n" +
+                        "------------------------------------------"
+
+                sh 'mvn clean install'
+                sh 'mvn install -Dmaven.test.skip=true'
+                sh 'echo "X"'
+            }
+
+        }
+
+        stage('OWASP Dependency-Check') {
+            when {
+                expression { params.ENABLE_DEPENDENCY_CHECK == true }
+            }
+            steps {
+                echo "\n------------------------------------------\n" +
+                        "OWASP DEPENDENCY-CHECK STAGE ------------\n" +
+                        "------------------------------------------"
+
+                withCredentials([usernameColonPassword(credentialsId: 'defectdojo-api-key', variable: 'DD_APIKEY')]) {
+                    // Complete list of dependencyCheck options https://www.jenkins.io/doc/pipeline/steps/dependency-check-jenkins-plugin/
+                    dependencyCheck additionalArguments: """
+                    -s "docker/${projectName}-v${projectVersion}.jar"
+                    -o "reports/"
+                    -f "ALL"
+                    --prettyPrint""", odcInstallation: 'dependency-check-5.2.2'
+
+                    // Publish the results for plugin
+                    dependencyCheckPublisher pattern: 'reports/dependency-check-report.xml'
+
+                    // Upload test results to DefectDojo
+                    sh '''
+                        set +x
+                        DATE_TIME=\"\$(date +'%Y-%m-%d')\"
+                        curl -s -i -F \'file=@reports/dependency-check-report.xml\' -H "Authorization: ApiKey $DD_APIKEY" -F 'scan_type=Dependency Check Scan' -F 'verified=true' -F 'active=true' -F scan_date=\${DATE_TIME} -F 'engagement=/api/v1/engagements/1/' ${defectDojoUrl}/api/v1/importscan/
+                    '''
+
+                }
+            }
+        }
+
+        stage('ScanCode Open-Source Check') {
+            when {
+                expression { params.ENABLE_SCANCODE_CHECK == true }
+            }
+            environment {
+                scanCodeReportName = "scancode-licenses-${reportSuffix}"
+            }
+            steps {
+                echo "\n------------------------------------------\n" +
+                        "SCANCODE OPEN-SOURCE CHECK ------------\n" +
+                        "------------------------------------------"
+
+                // Execute ScanCode for all types  (-c copyright, -l license, -p package, -e email, -u url)
+                // Use total number of available CPU cores - 1   (`expr $(nproc --all) - 1`)
+                // All the options available here https://scancode-toolkit.readthedocs.io/en/latest/cli-reference/synopsis.html#scancode-cli-options
+                sh '''
+                    echo "Run ScanCode..." 
+                    scancode -clipeu --processes `expr $(nproc --all) - 1` --json-pp reports/${scanCodeReportName}.json --html reports/${scanCodeReportName}.html .
+                                      
+                '''
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                echo "\n------------------------------------------\n" +
+                        "DOCKER BUILD STAGE ----------------------\n" +
+                        "------------------------------------------"
+
+                sh 'docker --version'
+                // Clean the previously built image
+                sh 'docker rmi ${dockerRegistryUrl}/${projectName}-${projectVersion} ${projectName}:${projectVersion} || true'
+                sh 'cd docker && docker build . -t ${projectName}:${projectVersion} --build-arg webgoat_version=v${projectVersion}'
+
+            }
+
+        }
+
+        stage('Arachni Vulnerability Scan') {
+            when {
+                expression { params.ENABLE_ARACHNI_SCAN == true }
+            }
+            environment {
+                arachniPath = tool name: "ARACHNI", type: "com.cloudbees.jenkins.plugins.customtools.CustomTool"
+                arachniReportName = "arachni-report-${reportSuffix}"
+            }
+            steps {
+                echo "\n------------------------------------------\n" +
+                        "ARACHNI VULNERABILITY SCAN STAGE --------\n" +
+                        "------------------------------------------"
+
+                withCredentials([usernameColonPassword(credentialsId: 'defectdojo-api-key', variable: 'DD_APIKEY')]) {
+
+                    // Run the application container locally, sleep to allow application to start
+                    sh '''
+                    SLEEP=60
+                    docker run -d -p 80:8888 -p 8080:8080 -p 9090:9090 -e TZ=Europe/Dublin --name ${projectName}-dast-analysis ${projectName}:${projectVersion}
+                    echo "Sleeping ${SLEEP} seconds for container to start..."
+                    sleep ${SLEEP}
+                '''
+
+                    // Execute Arachni scan against the container
+                    sh '''
+                    CONTAINER_IP=\$(docker inspect -f \'{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}\' ${projectName}-dast-analysis)
+                    ${arachniPath}/arachni-1.5.1-0.5.12/bin/arachni http://${CONTAINER_IP}:8080/WebGoat --report-save-path=${arachniReportName}.afr --output-only-positives
+
+                '''
+
+                    // Create HTML and JSON reports
+                    sh '${arachniPath}/arachni-1.5.1-0.5.12/bin/arachni_reporter ${arachniReportName}.afr --reporter=html:outfile=reports/${arachniReportName}.html.zip'
+                    sh '${arachniPath}/arachni-1.5.1-0.5.12/bin/arachni_reporter ${arachniReportName}.afr --reporter=json:outfile=reports/${arachniReportName}.json'
+
+                    // Upload test results to DefectDojo
+                    sh '''
+                    DATE_TIME=\"\$(date +'%Y-%m-%d')\"
+                    curl -s -i -F file=@reports/${arachniReportName}.json -H "Authorization: ApiKey $DD_APIKEY" -F 'scan_type=Arachni Scan' -F 'verified=true' -F 'active=true' -F scan_date=\${DATE_TIME} -F 'engagement=/api/v1/engagements/1/' ${defectDojoUrl}/api/v1/importscan/
+                '''
+
+                }
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+                echo "\n------------------------------------------\n" +
+                        "DOCKER PUSH STAGE -----------------------\n" +
+                        "------------------------------------------"
+
+                sh '''
+                        docker tag ${projectName}:${projectVersion} ${dockerRegistryUrl}/${projectName}-${projectVersion}
+                        docker push ${dockerRegistryUrl}/${projectName}-${projectVersion}
+                        
+                   '''
+
+                script {
+                    echo "Getting image digest..."
+                    imageDigest = sh(script: 'docker inspect --format=\'{{index .RepoDigests 0}}\' ${dockerRegistryUrl}/${projectName}-${projectVersion} | cut -d "@" -f 2', returnStdout: true).trim()
+                }
+
+                echo "Image Digest: ${imageDigest}"
+
+            }
+
+        }
+
+        stage('Clair Image Scan') {
+            when {
+                expression { params.ENABLE_CLAIR_SCAN == true }
+            }
+            environment {
+                klarReportName = "klar-report-${reportSuffix}"
+            }
+            steps {
+                echo "\n------------------------------------------\n" +
+                        "CLAIR IMAGE SCAN STAGE ------------------\n" +
+                        "------------------------------------------"
+
+                withCredentials([usernameColonPassword(credentialsId: 'defectdojo-api-key', variable: 'DD_APIKEY')]) {
+
+                    sh '''
+                        set +x
+                        #echo "Downloading klar client..."
+                        #curl -sLo klar ${klarClientUrl}
+                        #chmod +x klar
+                        
+                        echo "Setting klar env vars..." 
+                        export CLAIR_ADDR=${clairServerUrl}
+                        export REGISTRY_INSECURE=true
+                        export CLAIR_THRESHOLD=${clairTreshold}
+                        
+                        echo "Running klar with TXT output..."
+                        klar ${dockerRegistryUrl}/${projectName}-${projectVersion} | tee reports/${klarReportName}.txt
+
+                        echo "Running klar with JSON output..."
+                        export JSON_OUTPUT=true
+                        klar ${dockerRegistryUrl}/${projectName}-${projectVersion} > reports/${klarReportName}.json
+                                
+                        echo "Uploading report to DefectDojo..." 
+                        DATE_TIME=\"\$(date +'%Y-%m-%d')\"
+                        curl -s -i -F file=@reports/${klarReportName}.json -H "Authorization: ApiKey $DD_APIKEY" -F 'scan_type=Clair Klar Scan' -F 'verified=true' -F 'active=true' -F scan_date=\${DATE_TIME} -F 'engagement=/api/v1/engagements/1/' ${defectDojoUrl}/api/v1/importscan/
+
+                 '''
+                }
+            }
+
+        }
+
+        stage('Deploy') {
+            environment {
+                imageDigest = "${imageDigest}"
+            }
+            steps {
+                echo "\n------------------------------------------\n" +
+                        "DEPLOY STAGE ----------------------------\n" +
+                        "------------------------------------------"
+
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+
+                    sh '''
+                        set +x
+                        echo "\nPrint cluster-info..."
+                        kubectl --kubeconfig $KUBECONFIG cluster-info
+
+                        APP_VERSION=${projectVersion}
+                        echo "\nDeleting existing deployment (if exists)..."
+                        kubectl --kubeconfig $KUBECONFIG delete pod ${projectName} || true
+                        kubectl --kubeconfig $KUBECONFIG delete svc ${projectName} || true
+
+                        echo "\nDeploying application version v${APP_VERSION}..." 
+                        kubectl --kubeconfig $KUBECONFIG run ${projectName} --image=localhost:32000/${projectName}-${projectVersion}@${imageDigest} --env TZ=Europe/Dublin
+                        kubectl --kubeconfig $KUBECONFIG expose pod ${projectName} --type NodePort --port=8080 --name=${projectName}
+
+                        echo "\n-----------------------------------------------------------------------------------------"
+                        echo "Deployment successful, application can be accessed on the following URL:"
+                        NODE_PORT=$(kubectl --kubeconfig $KUBECONFIG get service webgoat-server -o=jsonpath='{.spec.ports[0].nodePort}')
+                        echo "-----------------------------------------------------------------------------------------"
+                        echo "http://${kubernetesHostIp}:${NODE_PORT}/WebGoat/login"
+                        echo "-----------------------------------------------------------------------------------------"
+
+                   '''
+
+                }
+
+            }
+
+        }
+
+    }   // stages end
+
+    post {
+        always {
+            // Archive all the reports, ignore if none exist
+            archiveArtifacts artifacts: "reports/*", fingerprint: true, allowEmptyArchive: true
+
+            // Cleanup of running project containers
+            sh '''
+                set +x
+                echo 'Post cleanup tasks:'
+                echo 'Stopping DAST Analysis conainer if still running...'
+                id=$(docker ps --filter "name=${projectName}-dast-analysis" -q)
+                if [ -z "$id" ] ; then
+                    echo "All good, nothing left running."
+                else
+                    echo "Container left running, cleaning up..."
+                    docker rm -f ${id} 
+                fi
+            '''
+        }
+        unstable {
+            echo 'Job run was UNSTABLE'
+            // Add post steps for unstable run here
+        }
+    }
+
+}
