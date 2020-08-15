@@ -1,0 +1,19 @@
+# Arachni 1.5.1
+version: '3.7'
+
+services:
+  arachni:
+    image: arachni/arachni:1.5.1
+    restart: always
+    networks:
+      - jenkinsnet
+    environment:
+      DB_ADAPTER: "sqlite"
+    ports:
+      - 7331:7331
+      - 9292:9292
+    container_name: arachni
+
+networks:
+  jenkinsnet:
+    driver: bridge

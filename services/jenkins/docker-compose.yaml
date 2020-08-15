@@ -5,7 +5,7 @@ services:
 
   jenkins:
     build:
-      context: ..
+      context: ""
     image: jenkins-manager:latest
     restart: always
     networks:

@@ -1,0 +1,53 @@
+# Sonarqube 7.9 with Postgres 
+version: '3.7'
+
+services:
+  db:
+    image: postgres:9.5
+    restart: "no"
+    networks:
+      - sonarnet
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: sonar
+    volumes:
+      - postgresql:/var/lib/postgresql
+      - postgresql_data:/var/lib/postgresql/data
+
+  sonarqube:
+    image: sonarqube:7.9-community
+    depends_on:
+      - db
+    ports:
+      - "9006:9000"
+    networks:
+      - sonarnet
+    restart: always
+    environment:
+      sonar.jdbc.url: jdbc:postgresql://db:5432/sonar
+      sonar.jdbc.username: sonar
+      sonar.jdbc.username: sonar
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+      - sonarqube_temp:/opt/sonarqube/temp
+      - sonarqube_conf:/opt/sonarqube/conf
+
+networks:
+  sonarnet:
+    ipam:
+      driver: default
+      config:
+       - subnet: "172.18.0.0/24"
+
+volumes:
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:
+  sonarqube_temp:
+  sonarqube_conf:
+  postgresql:
+  postgresql_data:
+  
+

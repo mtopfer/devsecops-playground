@@ -1,7 +1,7 @@
 pipeline {
     agent {
         docker {
-            image 'jdk11-agent'
+            image 'jdk11-agent:latest'
             args '-v /var/jenkins_home/.m2:/root/.m2'
         }
     }
