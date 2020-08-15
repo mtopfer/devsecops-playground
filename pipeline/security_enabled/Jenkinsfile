@@ -121,10 +121,10 @@ pipeline {
                 withCredentials([usernameColonPassword(credentialsId: 'defectdojo-api-key', variable: 'DD_APIKEY')]) {
 
                     sh '''
-                    echo "Uploading report to DefectDojo..." 
-                    DATE_TIME=\"\$(date +'%Y-%m-%d')\"
-                    curl -s -i -F file=@reports/${sonarQubeReportName}.html -H "Authorization: ApiKey $DD_APIKEY" -F 'scan_type=SonarQube Scan' -F 'verified=true' -F 'active=true' -F scan_date=\${DATE_TIME} -F 'engagement=/api/v1/engagements/1/' ${defectDojoUrl}/api/v1/importscan/
-                '''
+                        echo "Uploading report to DefectDojo..." 
+                        DATE_TIME=\"\$(date +'%Y-%m-%d')\"
+                        curl -s -i -F file=@reports/${sonarQubeReportName}.html -H "Authorization: ApiKey $DD_APIKEY" -F 'scan_type=SonarQube Scan' -F 'verified=true' -F 'active=true' -F scan_date=\${DATE_TIME} -F 'engagement=/api/v1/engagements/1/' ${defectDojoUrl}/api/v1/importscan/
+                    '''
 
                 }
 
@@ -250,18 +250,19 @@ pipeline {
 
                     // Run the application container locally, sleep to allow application to start
                     sh '''
-                    SLEEP=60
-                    docker run -d -p 80:8888 -p 8080:8080 -p 9090:9090 -e TZ=Europe/Dublin --name ${projectName}-dast-analysis ${projectName}:${projectVersion}
-                    echo "Sleeping ${SLEEP} seconds for container to start..."
-                    sleep ${SLEEP}
-                '''
+                        SLEEP=60
+                        docker run -d -p 80:8888 -p 8080:8080 -p 9090:9090 -e TZ=Europe/Dublin --name ${projectName}-dast-analysis ${projectName}:${projectVersion}
+                        echo "Sleeping ${SLEEP} seconds for container to start..."
+                        sleep ${SLEEP}
+                        
+                    '''
 
                     // Execute Arachni scan against the container
                     sh '''
-                    CONTAINER_IP=\$(docker inspect -f \'{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}\' ${projectName}-dast-analysis)
-                    ${arachniPath}/arachni-1.5.1-0.5.12/bin/arachni http://${CONTAINER_IP}:8080/WebGoat --report-save-path=${arachniReportName}.afr --output-only-positives
+                        CONTAINER_IP=\$(docker inspect -f \'{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}\' ${projectName}-dast-analysis)
+                        ${arachniPath}/arachni-1.5.1-0.5.12/bin/arachni http://${CONTAINER_IP}:8080/WebGoat --report-save-path=${arachniReportName}.afr --output-only-positives
 
-                '''
+                    '''
 
                     // Create HTML and JSON reports
                     sh '${arachniPath}/arachni-1.5.1-0.5.12/bin/arachni_reporter ${arachniReportName}.afr --reporter=html:outfile=reports/${arachniReportName}.html.zip'
@@ -271,7 +272,9 @@ pipeline {
                     sh '''
                     DATE_TIME=\"\$(date +'%Y-%m-%d')\"
                     curl -s -i -F file=@reports/${arachniReportName}.json -H "Authorization: ApiKey $DD_APIKEY" -F 'scan_type=Arachni Scan' -F 'verified=true' -F 'active=true' -F scan_date=\${DATE_TIME} -F 'engagement=/api/v1/engagements/1/' ${defectDojoUrl}/api/v1/importscan/
-                '''
+                    
+                    '''
+
 
                 }
             }
@@ -287,7 +290,7 @@ pipeline {
                         docker tag ${projectName}:${projectVersion} ${dockerRegistryUrl}/${projectName}-${projectVersion}
                         docker push ${dockerRegistryUrl}/${projectName}-${projectVersion}
                         
-                   '''
+                '''
 
                 script {
                     echo "Getting image digest..."
@@ -316,10 +319,7 @@ pipeline {
 
                     sh '''
                         set +x
-                        #echo "Downloading klar client..."
-                        #curl -sLo klar ${klarClientUrl}
-                        #chmod +x klar
-                        
+                       
                         echo "Setting klar env vars..." 
                         export CLAIR_ADDR=${clairServerUrl}
                         export REGISTRY_INSECURE=true
@@ -393,7 +393,7 @@ pipeline {
             sh '''
                 set +x
                 echo 'Post cleanup tasks:'
-                echo 'Stopping DAST Analysis conainer if still running...'
+                echo 'Stopping DAST Analysis container if still running...'
                 id=$(docker ps --filter "name=${projectName}-dast-analysis" -q)
                 if [ -z "$id" ] ; then
                     echo "All good, nothing left running."
