@@ -30,6 +30,10 @@ pipeline {
                 defaultValue: true,
                 description: '',
                 name: 'ENABLE_DEPENDENCY_CHECK')
+        string(
+                defaultValue: '5, 15, 50, 100',
+                description: 'DependencyCheck Risk Gate: Number of total findings tolerated in a format CRITICAL,HIGH,MEDIUM,LOW',
+                name: 'dependencyCheckThresholdList')
         booleanParam(
                 defaultValue: true,
                 description: '',
@@ -158,8 +162,7 @@ pipeline {
                         "------------------------------------------"
 
                 sh 'mvn clean install'
-                sh 'mvn install -Dmaven.test.skip=true'
-                sh 'echo "X"'
+                // sh 'mvn install -Dmaven.test.skip=true'
             }
 
         }
@@ -168,12 +171,21 @@ pipeline {
             when {
                 expression { params.ENABLE_DEPENDENCY_CHECK == true }
             }
+            environment {
+                // Splitting the parameter to get individual values
+                t_critical = dependencyCheckThresholdList.split(",")[0].trim()
+                t_high = dependencyCheckThresholdList.split(",")[1].trim()
+                t_medium = dependencyCheckThresholdList.split(",")[2].trim()
+                t_low = dependencyCheckThresholdList.split(",")[3].trim()
+            }
             steps {
                 echo "\n------------------------------------------\n" +
                         "OWASP DEPENDENCY-CHECK STAGE ------------\n" +
                         "------------------------------------------"
-
                 withCredentials([usernameColonPassword(credentialsId: 'defectdojo-api-key', variable: 'DD_APIKEY')]) {
+
+                    echo "Thresholds are: Critical ${t_critical}, High ${t_high}, Medium ${t_medium}, Low ${t_low}"
+
                     // Complete list of dependencyCheck options https://www.jenkins.io/doc/pipeline/steps/dependency-check-jenkins-plugin/
                     dependencyCheck additionalArguments: """
                     -s "docker/${projectName}-v${projectVersion}.jar"
@@ -182,15 +194,26 @@ pipeline {
                     --prettyPrint""", odcInstallation: 'dependency-check-5.2.2'
 
                     // Publish the results for plugin
-                    dependencyCheckPublisher pattern: 'reports/dependency-check-report.xml'
+                    dependencyCheckPublisher pattern: 'reports/dependency-check-report.xml',
+                            failedTotalCritical: "${t_critical}",
+                            failedTotalHigh: "${t_high}",
+                            failedTotalMedium: "${t_medium}",
+                            failedTotalLow: "${t_low}"
 
                     // Upload test results to DefectDojo
                     sh '''
-                        set +x
-                        DATE_TIME=\"\$(date +'%Y-%m-%d')\"
-                        curl -s -i -F \'file=@reports/dependency-check-report.xml\' -H "Authorization: ApiKey $DD_APIKEY" -F 'scan_type=Dependency Check Scan' -F 'verified=true' -F 'active=true' -F scan_date=\${DATE_TIME} -F 'engagement=/api/v1/engagements/1/' ${defectDojoUrl}/api/v1/importscan/
-                    '''
+                            set +x
+                            DATE_TIME=\"\$(date +'%Y-%m-%d')\"
+                            curl -s -i -F \'file=@reports/dependency-check-report.xml\' -H "Authorization: ApiKey $DD_APIKEY" -F 'scan_type=Dependency Check Scan' -F 'verified=true' -F 'active=true' -F scan_date=\${DATE_TIME} -F 'engagement=/api/v1/engagements/1/' ${defectDojoUrl}/api/v1/importscan/
+                        '''
 
+                    // Check the results, this will fail the build if thresholds were breached
+                    script {
+                        if (currentBuild.result == "FAILURE") {
+                            echo "FAILURE: DependencyCheck findings exceeded exceed configured thresholds"
+                            sh "exit 1"
+                        }
+                    }
                 }
             }
         }
